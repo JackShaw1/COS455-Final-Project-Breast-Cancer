@@ -83,10 +83,7 @@ def simulate_column(col_idx, col):
         # Fallback if GMM fitting fails
         gmm = GaussianMixture(n_components=1, random_state=42, n_init=10).fit(col_data_reshape)
 
-    # --- New Simulation Logic ---
-    
     # Determine a wide bracket for the inverse CDF (PPF) search
-    # Use data min/max and extend by 5 std devs to be safe
     col_std = np.std(col_data)
     if col_std == 0: # Handle columns with no variance
         col_std = 1e-3 # Add a tiny std dev
@@ -112,32 +109,30 @@ def simulate_column(col_idx, col):
         cdf_at_min = 0.0
         cdf_at_max = 1.0
     
-    # Small epsilon to ensure p is *strictly* inside the bracket [cdf_at_min, cdf_at_max]
+    # Small epsilon to ensure p is strictly inside the bracket [cdf_at_min, cdf_at_max]
     clip_epsilon = 1e-7 
 
     col_simulated = []
     for idx in indices_in_original:
-        # 1. Get original value
+        # Get original value
         x_orig = col_data[idx]
         
-        # 2. Calculate its CDF
+        # Calculate its CDF
         try:
             cdf_orig = gmm_cdf(x_orig, gmm)
         except Exception:
             cdf_orig = 0.5 # Fallback if CDF calculation fails
 
-        # 3. Generate n_samples_per_row new samples
+        # Generate n_samples_per_row new samples
         for _ in range(n_samples_per_row):
-            # 4. Get target CDF: cdf_orig +/- 2.5%
+            # Get random target CDF within cdf_orig +/- 2.5%
             perturbation = np.random.uniform(-0.025, 0.025)
             target_cdf = cdf_orig + perturbation
             
-            # 5. Clip to valid CDF range [0, 1]
-            # Clip to the *actual* dynamic CDF range of the bracket, not a static [0, 1]
-            # This guarantees f(a) and f(b) will have different signs for brentq
+            # Clip to valid CDF range [0, 1]
             target_cdf = np.clip(target_cdf, cdf_at_min + clip_epsilon, cdf_at_max - clip_epsilon)
 
-            # 6. Find x_new using inverse CDF (PPF)
+            # Find x_new using inverse CDF (PPF)
             try:
                 x_new = gmm_ppf(target_cdf, gmm, bracket_min, bracket_max)
             except Exception:
@@ -146,7 +141,6 @@ def simulate_column(col_idx, col):
                 x_new = x_orig * (1 + np.random.uniform(-0.025, 0.025))
             
             col_simulated.append(x_new)
-    # --- End New Logic ---
 
     if (col_idx + 1) % 5000 == 0:
         elapsed = time.time() - start_time_col
