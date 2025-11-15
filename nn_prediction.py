@@ -40,7 +40,6 @@ class Predictor(nn.Module):
         )
 
     def forward(self, x):
-        # expect x: torch.Tensor of shape (N, input_dim)
         return self.net(x)  # raw logits
 
 
@@ -136,7 +135,7 @@ def train(model, x, y, val_x=None, val_y=None, epochs=20000, batch_size=64, lr=1
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Choose optimizer (Adam or AdamW)
+    # Use AdamW optimizer
     opt_cls = pt.optim.AdamW if optimizer_type.lower() == 'adamw' else pt.optim.Adam
     optimizer = opt_cls(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()
@@ -149,14 +148,12 @@ def train(model, x, y, val_x=None, val_y=None, epochs=20000, batch_size=64, lr=1
 
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
-    # Use stdout for tqdm so it updates in most terminals; use explicit nested bars with positions
     for epoch in tqdm(range(1, epochs + 1), desc='Epochs', file=sys.stdout):
         model.train()
         total_loss = 0.0
         all_preds = []
         all_trues = []
 
-        # progress bar for batches (position 0 to allow nested bars to render)
         batch_iter = tqdm(loader, desc=f'Epoch {epoch}', leave=False, file=sys.stdout, position=0)
         for xb, yb in batch_iter:
             xb = xb.to(device)
@@ -205,11 +202,9 @@ def train(model, x, y, val_x=None, val_y=None, epochs=20000, batch_size=64, lr=1
 
         logging.info(f'Epoch {epoch} train_loss={avg_loss:.4f} train_acc={train_acc:.4f} val_loss={val_loss} val_acc={val_acc} batch_size={batch_size} gpu_info={gpu_info}')
 
-        # Use tqdm.write so the message doesn't break the progress bar rendering
         try:
             tqdm.write(f"Epoch {epoch}/{epochs} train_loss={avg_loss:.4f} train_acc={train_acc:.4f} val_loss={val_loss if val_loss is not None else float('nan'):.4f} val_acc={val_acc if val_acc is not None else float('nan'):.4f}")
         except Exception:
-            # fallback
             print(f"Epoch {epoch}/{epochs} train_loss={avg_loss:.4f} train_acc={train_acc:.4f} val_loss={val_loss if val_loss is not None else float('nan'):.4f} val_acc={val_acc if val_acc is not None else float('nan'):.4f}")
 
     return model, history, le
@@ -217,34 +212,37 @@ def train(model, x, y, val_x=None, val_y=None, epochs=20000, batch_size=64, lr=1
 
 def main():
     os.makedirs('observations', exist_ok=True)
+    augment_df = pd.read_csv("/n/fs/vision-mix/jl0796/qcb/qcb455_project/Breast_GSE45827_simulated_10x_cdf_fixed_gmm.csv")
+    df = pd.read_csv("/n/fs/vision-mix/jl0796/qcb/qcb455_project/renamed_subtyping_by_clustering_new.csv")
 
-    df = pd.read_csv("/n/fs/vision-mix/jl0796/qcb/qcb455_project/Breast_GSE45827_simulated_10x.csv")
-
-    # Determine id column (to split on unique original sample ids when available)
-    id_col = 'original_sample_id' #, 'samples', 'sample_id', 'original']
-    # id_col = next((c for c in id_col_candidates if c in df.columns), None)
+    id_col = 'original_sample_id' 
 
     label_col_candidates = ['cluster']
     label_col = next((c for c in label_col_candidates if c in df.columns), df.columns[1])
-
-    # Choose input columns: prefer floats (the simulated features are floating-point)
-    # numeric_cols = df.select_dtypes(include=[np.floating]).columns.tolist()
-    # if len(numeric_cols) == 0:
-        # fallback to columns after common metadata columns
     
     numeric_cols = df.columns[4:].tolist()
-    # numeric_cols = df.columns[1004:1005].tolist()
 
     # Create train/validation split by unique original sample id
     if id_col is not None:
+        # 80/20 split by original ID.
         unique_ids = np.asarray(df[id_col].unique())
-        # Do an 80/20 split by id.
         np.random.seed(42)
         n_train_ids = max(1, int(len(unique_ids) * 0.8))
         train_ids = np.random.choice(unique_ids, size=n_train_ids, replace=False)
-        train_mask = df[id_col].isin(train_ids)
-        train_df = df[train_mask].reset_index(drop=True)
-        val_df = df[~train_mask].reset_index(drop=True)
+
+        train_mask = augment_df[id_col].isin(train_ids) 
+        val_mask = df[id_col].isin(train_ids) 
+
+        train_df = augment_df[train_mask].reset_index(drop=True) 
+        val_df = df[~val_mask].reset_index(drop=True)
+        
+        print(f"Total original samples: {len(unique_ids)}. Training on {n_train_ids} IDs, Validating on {len(unique_ids) - n_train_ids} IDs.")
+        print(f"Augmented training set size: {len(train_df)} rows")
+        print(f"Unaugmented validation set size: {len(val_df)} rows")
+
+    else:
+        print("Warning: 'original_sample_id' not found. Splitting randomly.")
+        sys.exit(0)
 
     X_train = train_df[numeric_cols].values
     y_train = train_df[label_col].values
@@ -259,8 +257,14 @@ def main():
 
     input_dim = X_train.shape[1]
     num_classes = len(set(y_train))
+    
+    temp_le = LabelEncoder()
+    temp_le.fit(np.concatenate((y_train, y_val)))
+    num_classes = len(temp_le.classes_)
+    print(f"Found {num_classes} classes: {temp_le.classes_}")
 
     model = Predictor(input_dim, num_classes)
+    
     model, history, le = train(model, X_train, y_train, val_x=X_val, val_y=y_val, epochs=1000)
 
     # Print final performance
@@ -269,30 +273,55 @@ def main():
     print(f"Final train acc: {final_train_acc:.4f} | Final val acc: {final_val_acc:.4f}")
 
     # Plot training curves
-    epochs = list(range(1, len(history['train_loss']) + 1))
+    epochs_range = list(range(1, len(history['train_loss']) + 1))
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, history['train_loss'], label='train_loss')
+    plt.plot(epochs_range, history['train_loss'], label='train_loss')
     if any(v is not None for v in history['val_loss']):
-        plt.plot(epochs, history['val_loss'], label='val_loss')
+        plt.plot(epochs_range, history['val_loss'], label='val_loss')
     plt.xlabel('epoch')
     plt.ylabel('loss')
     plt.legend()
 
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, history['train_acc'], label='train_acc')
+    plt.plot(epochs_range, history['train_acc'], label='train_acc')
     if any(v is not None for v in history['val_acc']):
-        plt.plot(epochs, history['val_acc'], label='val_acc')
+        plt.plot(epochs_range, history['val_acc'], label='val_acc')
     plt.xlabel('epoch')
     plt.ylabel('accuracy')
     plt.legend()
 
     plt.tight_layout()
-    out_path = 'observations/prediction_training.png'
+    out_path = 'observations/prediction_training_new_data.png'
     plt.savefig(out_path, dpi=150)
     print(f"Saved training plot to {out_path}")
 
 
+    # Save the trained model for later use
+    model_save_path = 'observations/trained_model.pth'
+    pt.save(model.state_dict(), model_save_path)
+    print(f"Model saved to {model_save_path}")
+
+    # Predict on the original dataset 
+    print("Generating predictions for the original dataset.")
+    X_full = df[numeric_cols].values
+    
+    device = "cuda" if pt.cuda.is_available() else "cpu"
+    model.to(device) # Make sure model is on the right device
+    
+    X_full_tensor = pt.tensor(np.asarray(X_full), dtype=pt.float32).to(device)
+    
+    model.eval()
+    with pt.no_grad():
+        logits = model(X_full_tensor)
+        preds_idx = logits.argmax(dim=1).cpu().numpy()
+    preds_decoded = le.inverse_transform(preds_idx)
+    
+    df['prediction'] = preds_decoded
+
+    csv_out_path = 'observations/predictions_full_dataset.csv'
+    df.to_csv(csv_out_path, index=False)
+    print(f"Saved full dataset with predictions to {csv_out_path}")
+
 if __name__ == '__main__':
     main()
-
