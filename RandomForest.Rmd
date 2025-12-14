@@ -1,7 +1,7 @@
 ---
 title: "Final_Project"
 author: "Jack McMahon"
-date: "2025-10-30"
+date: "2025-12-14"
 output: pdf_document
 ---
 
@@ -115,3 +115,37 @@ pheatmap(confusion_matrix_all_matrix,
          color = custom_colors)
 
 ```
+
+```{r}
+importance_m1 <- importance(model1, type = 1) 
+importance_m2 <- importance(model2, type = 1) 
+importance_m3 <- importance(model3, type = 1) 
+importance_m4 <- importance(model4, type = 1) 
+importance_m5 <- importance(model5, type = 1) 
+combined_importance <- cbind(importance_m1, importance_m2, importance_m3, 
+                             importance_m4, importance_m5)
+average_importance <- data.frame(
+  Gene = rownames(combined_importance),
+  MeanImportance = rowMeans(combined_importance)
+)
+top_genes <- average_importance[order(average_importance$MeanImportance, decreasing = TRUE), ]
+
+print("Top 10 Most Relevant Genes:")
+print(head(top_genes, 10))
+
+library(ggplot2)
+top20_plot_data <- head(top_genes, 20)
+
+ggplot(top20_plot_data, aes(x = reorder(Gene, MeanImportance), y = MeanImportance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() + 
+  labs(title = "Top 20 Most Importanct Features (Random Forest)",
+       x = "Probe ID",
+       y = "Mean Decrease in Accuracy") +
+  theme_minimal()
+
+```
+
+
+
+
