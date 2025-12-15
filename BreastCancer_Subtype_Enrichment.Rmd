@@ -1,0 +1,348 @@
+---
+title: "Breast Cancer Subtyping Project Gene Set Enrichment Analysis"
+output: html_document
+---
+
+```{r Initiate}
+
+########################################
+## Enrichment Analysis |  Seth Berke ##
+##               QCB 455             ##
+#######################################
+
+# Read in libraries and data
+library(data.table)
+library(AnnotationDbi)
+library(hgu133plus2.db)
+library(limma)
+library(clusterProfiler)
+library(dplyr)
+library(msigdbr)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+
+setwd("/Users/sethberke/QCB455/project_proposal/")
+
+data <- fread("Breast_GSE45827.csv")
+data <- as.data.frame(data)
+```
+
+```{r GSEA Pipeline for Breast Cancer Subtypes}
+
+####################################################
+## Enrichment Pipeline for Breast Cancer Subtypes ##
+####################################################
+
+# We need to isolate probe names to convert
+probe_cols <- grep("(_at|_s_at|_x_at|_g_at)$", colnames(data), value = TRUE)
+e_mat <- as.matrix(data[, probe_cols])
+rownames(e_mat) <- data$samples
+e_mat <- t(e_mat) # making probe ids the rows will help with the conversion
+probe_ids <- rownames(e_mat)
+
+# hgu133plus2 is for the Affymetrix Human Genome U133 Plus 2.0 microarray platform
+# here we are converting to proper gene IDs
+gene_symbols <- mapIds(hgu133plus2.db,
+                       keys = probe_ids,
+                       column = "SYMBOL",
+                       keytype = "PROBEID",
+                       multiVals = "first")
+
+# probeIDs & genes
+annotation_df <- data.frame(
+  PROBEID = probe_ids,
+  SYMBOL = gene_symbols,
+  stringsAsFactors = FALSE
+)
+
+# add these gene names to the expression matrix
+expr_annot <- cbind(annotation_df, e_mat)
+
+# sample connected to type
+meta <- data.frame(
+  sample = data$samples,
+  type   = data$type,
+  stringsAsFactors = FALSE
+)
+
+e_mat <- expr_annot[, -(1:2)]
+colnames(e_mat) <- colnames(expr_annot)[-(1:2)]
+colnames(e_mat) <- as.character(colnames(e_mat))
+meta$sample <- as.character(meta$sample)
+
+meta$type <- factor(meta$type)
+
+type_matrix <- model.matrix(~0 + meta$type)
+colnames(type_matrix) <- levels(meta$type)
+
+# define contrast matrix to identify sub-type specific transcritomic signatures
+contrast_matrix <- makeContrasts(
+  basal_vs_other_tumors      = basal - (HER + luminal_A + luminal_B)/3,
+  HER_vs_other_tumors        = HER   - (basal + luminal_A + luminal_B)/3,
+  luminal_A_vs_other_tumors  = luminal_A - (basal + HER + luminal_B)/3,
+  luminal_B_vs_other_tumors  = luminal_B - (basal + HER + luminal_A)/3,
+  levels = type_matrix
+)
+
+# ones to connect sample to subtype
+design <- model.matrix(~0 + meta$type)
+colnames(design) <- levels(meta$type)
+
+fit <- lmFit(e_mat, design) # this calculates mean gene expression for a given gene for a given group
+fit2 <- contrasts.fit(fit, contrast_matrix) # this uses contrast_matrix to see difference in the mean for a given gene with all others
+fit2 <- eBayes(fit2) # leverages the variance across all genes and uses this to adjust the effect sizes we find in the step above
+
+# a function that takes in these distinctions in means across subtypes to create a table of top candidate DEGs with pvalues (adjusted with benjamini hochberg) 
+# this table is then used to filter based on padjusted value of 0.05
+get_ranks <- function(fit2, expr_annot, contrast_name, fdr_cutoff = 0.05) {
+  top <- topTable(fit2, coef = contrast_name, number = Inf, adjust.method = "BH")
+  top$PROBEID <- rownames(top)
+  top <- merge(top, expr_annot[, c("PROBEID","SYMBOL")], by="PROBEID", all.x = TRUE)
+  
+  top_filtered <- top %>%
+    filter(!is.na(SYMBOL) & adj.P.Val < fdr_cutoff) %>%
+    group_by(SYMBOL) %>%                   
+    slice_max(order_by = abs(t), n = 1) %>% 
+    ungroup() %>%
+    arrange(desc(t))
+  
+  ranks <- top_filtered$t
+  names(ranks) <- top_filtered$SYMBOL
+  sort(ranks, decreasing = TRUE)
+}
+
+# running this DEG function for each subtype
+ranks_basal  <- get_ranks(fit2, expr_annot, "basal_vs_other_tumors")
+ranks_HER    <- get_ranks(fit2, expr_annot, "HER_vs_other_tumors")
+ranks_LumA   <- get_ranks(fit2, expr_annot, "luminal_A_vs_other_tumors")
+ranks_LumB   <- get_ranks(fit2, expr_annot, "luminal_B_vs_other_tumors")
+
+################################
+## OUTPUT FOR STRING-DB Tool ##
+###############################
+
+write.table(names(ranks_basal)[1:2000],
+            file = "basal_genes_top2000.txt",
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+write.table(names(ranks_HER)[1:2000],
+            file = "HER_genes_top2000.txt",
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+write.table(names(ranks_LumA)[1:2000],
+            file = "luminalA_genes_top2000.txt",
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+write.table(names(ranks_LumB)[1:2000],
+            file = "luminalB_genes_top2000.txt",
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+#######################################
+## MSIG's GSEA Function and Plotting ##
+#######################################
+
+msigdb <- msigdbr(species="Homo sapiens", category="H") # dataset that contains genes, pathways, etc
+hallmark <- msigdb[, c("gs_name","gene_symbol")]  # just gene and pathway
+
+# Gene Set Enrichment Analysis begins
+gsea <- function(ranks) {
+  GSEA(ranks,
+       TERM2GENE = hallmark,
+       pvalueCutoff = 0.25,
+       pAdjustMethod = "BH",
+       minGSSize = 15,
+       maxGSSize = 500,
+       verbose = TRUE)
+}
+
+gsea_basal <- gsea(ranks_basal)
+gsea_HER   <- gsea(ranks_HER)
+gsea_LumA  <- gsea(ranks_LumA)
+gsea_LumB  <- gsea(ranks_LumB)
+
+gsea_list <- list(
+  Basal = gsea_basal,
+  HER   = gsea_HER,
+  LumA  = gsea_LumA,
+  LumB  = gsea_LumB
+)
+
+plot_gsea <- function(gsea_res, subtype_name) {
+  res_df <- as.data.frame(gsea_res)
+  top10 <- res_df %>% arrange(desc(NES)) %>% head(10)
+  
+  name_col <- if ("Description" %in% colnames(top10)) "Description" else "ID"
+  top10$Description_clean <- top10[[name_col]] %>%
+    str_remove("^HALLMARK_") %>%
+    str_replace_all("_", " ") %>%
+    str_to_title()
+  
+  top10$hjust <- ifelse(top10$NES > 0, 1.05, -0.05)
+  top10$label_x <- reorder(top10$Description_clean, top10$NES)
+  
+  ggplot(top10, aes(x = label_x, y = NES, fill = NES)) +
+    geom_col(show.legend = FALSE) +
+    geom_col() +
+    geom_text(aes(label = Description_clean, y = NES, hjust = hjust),
+              size = 4, fontface = "bold", color = "white") +
+    coord_flip() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    labs(
+      title = paste0("Top Pathways (", subtype_name, "-Specific)"),
+      x = NULL,
+      y = "Normalized Enrichment Score (NES)"
+    ) +
+    guides(fill = "none") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.y = element_blank(),  
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+plots <- list()
+for (subtype in names(gsea_list)) {
+  plots[[subtype]] <- plot_gsea(gsea_list[[subtype]], subtype_name = subtype)
+}
+
+print(
+plots$Basal + plots$HER + plots$LumA + plots$LumB + plot_annotation(title = "Gene Set Enrichment Analysis for Immunostained-Derived Breast Cancer Subtypes")
+)
+
+```
+
+```{r Show contrast with just Breast Cancer vs else}
+
+###################################################################
+## Showing the effect of not subtyping (Breast Cancer vs Normal) ##
+###################################################################
+
+contrast_matrix_cancer <- makeContrasts(
+  breast_cancer_vs_normal = (basal + HER + luminal_A + luminal_B)/4 - normal,
+  levels = type_matrix
+)
+
+fit_cancer <- lmFit(e_mat, type_matrix)
+fit2_cancer <- contrasts.fit(fit_cancer, contrast_matrix_cancer)
+fit2_cancer <- eBayes(fit2_cancer)
+
+ranks_cancer_vs_normal <- get_ranks(fit2_cancer, expr_annot, "breast_cancer_vs_normal")
+
+gsea_cancer_vs_normal <- gsea(ranks_cancer_vs_normal)
+
+write.table(names(ranks_cancer_vs_normal)[1:2000],
+            file = "all_subtypes_genes_top2000.txt",
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+print(plot_gsea(gsea_cancer_vs_normal, subtype_name = "Breast Cancer"))
+```
+
+```{r Newly-Defined Clusters}
+
+###################################################################
+## Now working with the clusters we defined from gene expression ##
+###################################################################
+
+## subsets the top 10 hallmark pathways present in the immunostained-defined subtypes
+original_top <- unique(c(
+  as.data.frame(gsea_basal) %>% arrange(desc(NES)) %>% head(10) %>% pull(Description),
+  as.data.frame(gsea_HER)   %>% arrange(desc(NES)) %>% head(10) %>% pull(Description),
+  as.data.frame(gsea_LumA)  %>% arrange(desc(NES)) %>% head(10) %>% pull(Description),
+  as.data.frame(gsea_LumB)  %>% arrange(desc(NES)) %>% head(10) %>% pull(Description)
+))
+
+# santize these pathway names
+clean_pathway <- function(x) {
+  x %>% 
+    str_to_lower() %>% 
+    str_remove("^hallmark_") %>%
+    str_replace_all("_","") %>% 
+    str_replace_all("[^a-z0-9]","") %>% 
+    trimws()
+}
+original_top_clean <- clean_pathway(original_top)
+
+# read in the subtypes that we defined and then run same pipeline
+new_subtypes <- fread("subtyping_by_clustering.csv") |> as.data.frame()
+new_subtypes$sample_id <- as.character(new_subtypes$sample_id)
+new_subtypes$cluster <- as.factor(new_subtypes$cluster)
+
+design_new <- model.matrix(~0 + new_subtypes$cluster)
+colnames(design_new) <- paste0("cluster", levels(new_subtypes$cluster))
+
+contrast.matrix.new <- makeContrasts(
+  cluster1_vs_others = cluster1 - (cluster2+cluster5+cluster6)/3,
+  cluster2_vs_others = cluster2 - (cluster1+cluster5+cluster6)/3,
+  cluster5_vs_others = cluster5 - (cluster1+cluster2+cluster6)/3,
+  cluster6_vs_others = cluster6 - (cluster1+cluster2+cluster5)/3,
+  levels = design_new
+)
+
+fit_new <- lmFit(e_mat, design_new)
+fit2_new <- contrasts.fit(fit_new, contrast.matrix.new)
+fit2_new <- eBayes(fit2_new)
+
+ranks_new <- lapply(c("cluster1_vs_others","cluster2_vs_others","cluster5_vs_others","cluster6_vs_others"), function(cn) {
+  get_ranks(fit2_new, expr_annot, cn)
+})
+names(ranks_new) <- paste0("Cluster", c(1,2,5,6))
+
+for (cluster_name in names(ranks_new)) {
+    gene_list <- names(ranks_new[[cluster_name]])[1:2000]
+    write.table(gene_list,
+                file = paste0(cluster_name, "_genes_top2000.txt"),
+                quote = FALSE,
+                row.names = FALSE,
+                col.names = FALSE)
+}
+
+gsea_new <- lapply(ranks_new, gsea)
+
+plot_gsea_highlight <- function(gsea_res, subtype_name, original_top_clean) {
+  res_df <- as.data.frame(gsea_res)
+  top10 <- res_df %>% arrange(desc(NES)) %>% head(10)
+  name_col <- if ("Description" %in% colnames(top10)) "Description" else "ID"
+  top10$Description_clean <- top10[[name_col]] %>%
+    str_remove("^HALLMARK_") %>%
+    str_replace_all("_", " ") %>%
+    str_to_title()
+  top10$Description_compare <- top10[[name_col]] %>%
+    str_to_lower() %>%
+    str_remove("^hallmark_") %>%
+    str_replace_all("_", "") %>%
+    str_replace_all("[^a-z0-9]", "") %>%
+    trimws()
+  
+  top10$label_color <- ifelse(top10$Description_compare %in% original_top_clean, "white", "blue")
+  top10$hjust <- ifelse(top10$NES > 0, 1.05, -0.05)
+  top10$label_x <- reorder(top10$Description_clean, top10$NES)
+  
+  ggplot(top10, aes(x = label_x, y = NES, fill = NES)) +
+    geom_col(show.legend = FALSE) +
+    geom_col() +
+    geom_text(aes(label = Description_clean, y = NES, hjust = hjust, color = label_color),
+              size = 4, show.legend = FALSE, fontface = "bold") +
+    coord_flip() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    scale_color_identity() +
+    labs(
+      title = paste0("Top Pathways (", subtype_name, "-Specific)"),
+      x = NULL,
+      y = "Normalized Enrichment Score (NES)"
+    ) +
+    guides(fill = "none") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.y = element_blank(),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+plots_new <- lapply(names(gsea_new), function(cl) {
+  plot_gsea_highlight(gsea_new[[cl]], subtype_name = cl, original_top_clean = original_top_clean)
+})
+names(plots_new) <- names(gsea_new)
+
+print(plots_new$Cluster1 + plots_new$Cluster2 + plots_new$Cluster5 + plots_new$Cluster6 + plot_annotation(title = "Gene Set Enrichment Analysis for Gene Expression-Derived Breast Cancer Subtypes"))
+```
