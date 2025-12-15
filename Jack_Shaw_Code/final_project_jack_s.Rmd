@@ -1,0 +1,277 @@
+---
+title: "Final Project Update"
+author: "Jack Shaw"
+date: "2025-12-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load in the GSE45827 dataset downloaded from the CuMiDa library of microarray datasets...
+
+```{r, cache=TRUE}
+GSE45827 = read.table("Breast_GSE45827.csv", sep = ",", header = TRUE)
+```
+
+Load in the gene name mappings to the microarray probe ids in the microarray dataset...
+
+```{r, cache=TRUE}
+ids = data.frame(samples = GSE45827$samples, subtype = GSE45827$type)
+X = GSE45827[, 3:ncol(GSE45827)]
+for (j in seq_along(X)) {
+  X[[j]] = as.numeric(X[[j]])
+}
+```
+
+Perform PCA on the microarray gene expression values for the purpose of visualizing the results from the hierarchical clustering analysis...
+
+```{r}
+# PCA 
+pca = prcomp(X, center = TRUE, scale. = TRUE)
+scores <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  subtype = factor(ids$subtype),
+  sample_id = ids$samples
+)
+```
+
+Perform hierarchical agglomerative clustering based on the original Ward Jr., 1963 method...
+
+```{r}
+# Hierarchical agglomerative clustering using ward.D2 method
+hc = hclust(dist(X), method = "ward.D2")
+scores$cluster = factor(cutree(hc, k=6))
+
+# libraries for plotting and for layering multiple plots onto the same figure space
+library(ggplot2)
+library(patchwork)
+
+# Here, we will plot the projected samples onto our first two principal components. We will color code the projected samples based on their predicted clustering based on the hierarchical clustering with k=6, and then we will color code based on the subtypes defined by immunostaining...
+xlab = "PC1"
+ylab = "PC2"
+
+left = ggplot(scores, aes(PC1, PC2, color = subtype)) +
+  geom_point(size = 2, alpha = 0.9) +
+  labs(title = "Subtyping by immunostaining", x = xlab, y = ylab) +
+  theme(legend.position = "right") +
+  scale_color_brewer(palette = "Set1")
+
+right = ggplot(scores, aes(PC1, PC2, color = cluster)) +
+  geom_point(size = 2, alpha = 0.9) +
+  labs(title = "Subtyping by clustering", x = xlab, y = ylab) +
+  theme(legend.position = "right") +
+  scale_color_brewer(palette = "Dark2")
+
+(left + right) & coord_equal()
+```
+
+From the above plot, we can see how similar our subtypes by clustering are compared to the subtypes by immunostaining.
+
+For the purposes of visualizing the degree of similarity between our novel breast cancer subtypes defined by hierarchical clustering, we will create a dendrogram...
+
+```{r}
+# Final dendrogram
+library(dendextend)
+library(scales)
+cutoff = cutree(hc, hc_holder)
+colorscale = hue_pal()
+dendogram = as.dendrogram(hc)
+dendogram = dendogram %>%
+  set("branches_k_color", k=hc_holder, value=colorscale)
+plot(dend, main="Breast cancer subtypes by clustering, normal, and cell line")
+```
+
+
+Now, we will compare the top differentially expressed genes between our clusters and the subtypes defined by immunostaining. We will use limma, an approach based on linear regression.
+
+# DE analysis with limma
+
+First, run for clusters...
+
+```{r}
+library(limma)
+limma_data = data.frame(cluster = out_df$cluster)
+limma_data = cbind(limma_data, GSE45827[,3:ncol(GSE45827)])
+limma_data = subset(limma_data, cluster %in% c(1,2,5,6))
+limma_data$cluster = droplevels(factor(limma_data$cluster))
+X_new = t(as.matrix(limma_data[,-1]))
+# No intercept
+design_matrix = model.matrix(~0 + limma_data$cluster)
+limma_obj = eBayes(lmFit(X_new, design_matrix))
+head(limma_obj$p.value, 10)
+```
+
+```{r}
+top_de_genes = rownames(head(limma_obj$p.value, 10))
+top_de_genes = substr(top_de_genes, 2, nchar(top_de_genes))
+id_mappings = read.csv('Project_Mappings.csv')
+id_mappings$SYMBOL[id_mappings$PROBEID %in% top_de_genes]
+```
+
+Now run for subtypes defined by immunostaining...
+
+```{r}
+library(limma)
+limma_data_immuno = data.frame(subtype = out_df$subtype)
+limma_data_immuno = cbind(limma_data_immuno, GSE45827[,3:ncol(GSE45827)])
+limma_data_immuno = subset(limma_data_immuno, subtype %in% c("luminal_B", "luminal_A", "HER", "basal"))
+limma_data_immuno$subtype = droplevels(factor(limma_data_immuno$subtype))
+X_new_immuno = t(as.matrix(limma_data_immuno[,-1]))
+# No intercept
+design_matrix_immuno = model.matrix(~0 + limma_data_immuno$subtype)
+limma_obj_immuno = eBayes(lmFit(X_new_immuno, design_matrix_immuno))
+head(limma_obj_immuno$p.value, 10)
+```
+
+```{r}
+top_de_genes_immuno = rownames(head(limma_obj_immuno$p.value, 10))
+top_de_genes_immuno = substr(top_de_genes_immuno, 2, nchar(top_de_genes_immuno))
+id_mappings$SYMBOL[id_mappings$PROBEID %in% top_de_genes_immuno]
+```
+
+Now, we will run compare the mean expression level for HER2 and ESR1 between groups from our clusters and the subtypes defined by immunostaining using ANOVA F-tests. 
+
+First, we must calculate the number of probes targeting the genes that are immunostained for so that we can correct the p-value calculations for multiple hypothesis testing...
+
+```{r}
+id_mappings = read.csv('Monas_Project_Mappings.csv')
+her2_probes = id_mappings$PROBEID[!is.na(id_mappings$SYMBOL) & id_mappings$SYMBOL == "ERBB2"]
+esr1_probes = id_mappings$PROBEID[!is.na(id_mappings$SYMBOL) & id_mappings$SYMBOL == "ESR1"]
+pgr_probes = id_mappings$PROBEID[!is.na(id_mappings$SYMBOL) & id_mappings$SYMBOL == "PGR"]
+
+print('Number of probes targeting HER2')
+print(length(her2_probes))
+
+print('Number of probes targeting ESR1')
+print(length(esr1_probes))
+
+print('Number of probes targeting PGR')
+print(length(pgr_probes))
+
+```
+
+ANOVA for HER2 - Luminal A vs. HER2 and Cluster 2 vs. Cluster 5
+```{r, cache=TRUE}
+new_subtypes = out_df$cluster
+og_subtypes = out_df$subtype
+
+# keep only samples in subtypes 2 or 5
+mask = new_subtypes %in% c(2, 5)
+sub_2_5 = droplevels(new_subtypes[mask])
+immuno_mask = og_subtypes %in% c("luminal_A", "HER")
+immuno_2_5 = droplevels(factor(og_subtypes[immuno_mask]))
+
+pvals_her2_2v5 = numeric(length(her2_probes))
+pvals_immuno_her2_2v5 = numeric(length(her2_probes))
+
+for (i in seq_along(her2_probes)) {
+  values_sub = X[mask, paste0("X", her2_probes[i])]
+  values_immuno = X[immuno_mask, paste0("X", her2_probes[i])]
+
+  # 2 group comparison
+  fit <- aov(values_sub ~ sub_2_5)
+  pvals_her2_2v5[i] = summary(fit)[[1]][["Pr(>F)"]][1]
+  
+  immuno_fit = aov(values_immuno ~ immuno_2_5)
+  pvals_immuno_her2_2v5 = summary(immuno_fit)[[1]][["Pr(>F)"]][1]
+
+}
+
+print(mean(pvals_her2_2v5 / 3))
+print(mean(pvals_immuno_her2_2v5 / 3))
+
+```
+
+ANOVA for ESR1 - Luminal A vs. HER and Cluster 2 vs. Cluster 5
+```{r, cache=TRUE}
+new_subtypes = out_df$cluster
+og_subtypes = out_df$subtype
+
+# keep only samples in subtypes 2 or 5
+mask = new_subtypes %in% c(2, 5)
+sub_2_5 = droplevels(new_subtypes[mask])
+immuno_mask = og_subtypes %in% c("luminal_A", "HER")
+immuno_2_5 = droplevels(factor(og_subtypes[immuno_mask]))
+
+pvals_her2_2v5 = numeric(length(esr1_probes))
+pvals_immuno_her2_2v5 = numeric(length(esr1_probes))
+
+for (i in seq_along(esr1_probes)) {
+  values_sub = X[mask, paste0("X", esr1_probes[i])]
+  values_immuno = X[immuno_mask, paste0("X", esr1_probes[i])]
+
+  fit <- aov(values_sub ~ sub_2_5)
+  pvals_her2_2v5[i] = summary(fit)[[1]][["Pr(>F)"]][1]
+  
+  immuno_fit = aov(values_immuno ~ immuno_2_5)
+  pvals_immuno_her2_2v5 = summary(immuno_fit)[[1]][["Pr(>F)"]][1]
+}
+
+# 9 probes for ESR1
+print(mean(pvals_her2_2v5 / 9))
+print(mean(pvals_immuno_her2_2v5 / 9))
+
+```
+
+Now, we will remove the probes from the microarray dataset that target HER2. We will then perform our hierarchical clustering analysis again without the HER2 probes to determine how dependent our hierarchical clustering analysis is on a few genes.
+
+```{r}
+cols_to_drop = paste0("X", her2_probes)
+no_immuno_X = X[ , setdiff(colnames(X), cols_to_drop)]
+# PCA 
+no_immuno_pca = prcomp(no_immuno_X, center = TRUE, scale. = TRUE)
+no_immuno_scores <- data.frame(
+  PC1 = no_immuno_pca$x[, 1],
+  PC2 = no_immuno_pca$x[, 2],
+  subtype = factor(ids$subtype),
+  sample_id = ids$samples
+)
+
+# Hierarchical agglomerative clustering using ward.D2 method
+no_immuno_hc = hclust(dist(no_immuno_X), method = "ward.D2")
+no_immuno_scores$cluster = factor(cutree(no_immuno_hc, k=6))
+
+
+library(ggplot2)
+library(patchwork)
+
+# Plotting
+xlab = "PC1"
+ylab = "PC2"
+
+no_immuno_left = ggplot(no_immuno_scores, aes(PC1, PC2, color = subtype)) +
+  geom_point(size = 2, alpha = 0.9) +
+  labs(title = "Subtyping by immunostaining", x = xlab, y = ylab) +
+  theme(legend.position = "right") +
+  scale_color_brewer(palette = "Accent")
+
+no_immuno_right = ggplot(no_immuno_scores, aes(PC1, PC2, color = cluster)) +
+  geom_point(size = 2, alpha = 0.9) +
+  labs(title = "Subtyping by clustering", x = xlab, y = ylab) +
+  theme(legend.position = "right") +
+  scale_color_brewer(palette = "Spectral")
+
+(no_immuno_left + no_immuno_right) & coord_equal()
+```
+
+
+Now that we have newly defined breast cancer subtypes defined by hierarchical clustering, we will save the results as a .csv and send to the rest of the group so that they can use it in their gene set enrichment analysis and predictive random forest and XGBoost models...
+
+```{r}
+# Save new clusters
+ids = GSE45827[, 1:2]
+names(ids) = c("sample_id", "subtype")
+out_df = data.frame(
+  sample_id = meta$sample_id,
+  subtype = meta$subtype,
+  cluster = scores$cluster[ match(meta$sample_id, scores$sample_id) ]
+)
+write.csv(out_df, "subtyping_by_clustering.csv", row.names = FALSE)
+
+```
+
+
